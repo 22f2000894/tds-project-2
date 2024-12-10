@@ -7,6 +7,7 @@
 #     "tabulate",
 #     "chardet",
 #     "seaborn",
+#     "tenacity"
 # ]
 # ///
 
@@ -122,6 +123,11 @@ def summary_statistics(filename):
 
     except Exception as e:
         print("An error occurred:", e)
+
+
+def function_calling(*args, **kwargs):
+    pass
+
 
 # Command-line argument handling
 if len(sys.argv) > 1:

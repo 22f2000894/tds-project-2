@@ -126,7 +126,59 @@ def summary_statistics(filename):
 
 
 def function_calling(*args, **kwargs):
-    pass
+
+    json_data = {
+        "model": "gpt-3.5-turbo",
+        "messages": [
+            {
+                "role": "system",
+                "content": "You are a helpful assistant."
+            },
+            {
+                "role": "user",
+                "content": "give coulmn name and its type of dataframe"
+            }
+        ]
+    }
+
+    # content 
+    content = {
+        "Analyze the given dataset. The first line is header, and subsequent lines"
+        "are sample data. Columns may have uncleaned data in them ignore those cells, Infer the data types by considering mazority of the data."
+        "'integer', 'float', 'string', 'date', 'datetime', 'boolean'."
+    }
+    
+    # function schema
+    functions = {
+        "name" : "get_column_type",
+        "description": "Identify column names and their data types from a dataset.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "column_metadata": {
+                    "type": "array",
+                    "description": "Meta data for each column.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "column_name": {
+                                "type": "string",
+                                "description": "The Name of the column."
+                            },
+                            "column_type": {
+                                "type": "string",
+                                "description": "The data type of the column (e.g. integer, float, string, etc.)."
+                            }
+                        },
+                        "required": ["column_name", "column_type"]
+                    },
+                    "minItems" : 1,
+                },
+            },
+            "required": ["column_metadata"]
+        }
+    }
+        
 
 
 # Command-line argument handling

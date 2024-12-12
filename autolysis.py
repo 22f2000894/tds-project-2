@@ -8,16 +8,23 @@
 #     "chardet",
 #     "seaborn",
 #     "tenacity"
+#     "requests_cache"
+#     "requests"
+#     "hashlib"
 # ]
 # ///
 
 import os
 import sys
+import json
+import hashlib
 import pandas as pd
 import tabulate
 import chardet
 import seaborn as sns
 import matplotlib.pyplot as plt
+import requests_cache
+import requests
 from openai import OpenAI
 def print_hello_world():
     AIPROXY_TOKEN = os.getenv("AIPROXY_TOKEN", "Hello World")
@@ -26,11 +33,204 @@ def print_hello_world():
 print("Hello World")
 print_hello_world()
 
+
+class CustomCacheManager:
+    def __init__(self, cache_name='custom_cache'):
+        """
+        Initialize a cached session with custom cache key management
+        """
+        # Create a cached session
+        self.session = requests_cache.CachedSession(
+            cache_name=cache_name,
+            backend='sqlite',  # Using SQLite as cache backend
+            expire_after=timedelta(hours=24)  # Cache expiration
+        )
+
+    def set_cache_response(self, cache_key, url, params=None, method='GET'):
+        """
+        Manually set a cached response with a specific cache key
+        
+        :param cache_key: Custom unique identifier for the cache entry
+        :param url: URL to fetch
+        :param params: Optional query parameters
+        :param method: HTTP method (default: GET)
+        :return: Response object
+        """
+        # Perform the request
+        # response = self.session.request(method, url, params=params)
+        response = requests.get(url)
+        # Manually set the cache key
+        self.session.cache.save_response(
+            cache_key=cache_key,  # Use the custom cache key
+            response=response
+        )
+        
+        return response
+
+    def get_cached_response(self, cache_key):
+        """
+        Retrieve a cached response by its custom cache key
+        
+        :param cache_key: Custom cache key to retrieve
+        :return: Cached response or None
+        """
+        try:
+            # Attempt to retrieve the cached response
+            cached_response = self.session.cache.get_response(key=cache_key)
+            return cached_response
+        except KeyError:
+            print(f"No cached response found for key: {cache_key}")
+            return None
+
+    def delete_cache_entry(self, cache_key):
+        """
+        Delete a specific cache entry by its cache key
+        
+        :param cache_key: Custom cache key to delete
+        :return: Boolean indicating success
+        """
+        try:
+            # Remove the specific cache entry
+            self.session.cache.delete(cache_key)
+            print(f"Cache entry deleted for key: {cache_key}")
+            return True
+        except Exception as e:
+            print(f"Error deleting cache entry: {e}")
+            return False
+
+
+
+
+
+
 # detect encoding of csv file
 def detect_encoding(file_path):
     with open(file_path, 'rb') as f:
         result = chardet.detect(f.read())
+    f.close()
     return result['encoding']
+
+
+
+def get_column_details(filename, **kwargs):
+    # declare AIPROXY_TOKEN as global variable
+    global AIPROXY_TOKEN
+    # getting file encoding 
+    encoding = detect_encoding(filename)
+    # openai model
+    model = kwargs.get('model', 'gpt-4o-mini')
+    # url to do post request
+    url = kwargs.get('url', 'https://aiproxy.sanand.workers.dev/openai/v1/chat/completions')
+
+    AIPROXY_TOKEN = kwargs.get('AIPROXY_TOKEN', AIPROXY_TOKEN)
+
+    # headers
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization" : f"Bearer {AIPROXY_TOKEN}"
+    }
+
+    # system prompt 
+    content = """
+        Analyze the given dataset. The first line represents the header, and subsequent lines provide sample data. Columns may contain uncleaned or inconsistent data; ignore such cells when determining column properties. Infer the data type of each column by considering the majority of valid values, which can be one of the following: 'integer', 'float', 'string', 'date', 'datetime', or 'boolean'. Additionally, classify each column as 'quantitative' or 'qualitative', and further categorize them into subcategories: 'discrete', 'continuous', 'nominal', or 'ordinal'.
+
+        Handle time-related columns (e.g., years, dates, datetimes) carefully:
+        - Classify a time column as 'qualitative ordinal' if it represents an ordered sequence (e.g., event timelines, publication years, or historical rankings).
+        - Classify it as 'quantitative continuous' if it represents measurable intervals or durations (e.g., age in years, elapsed time).
+
+        Special cases for identifier-like columns (e.g., IDs, codes, roll numbers, pincode, phone numbers etc):
+        - Treat these as 'qualitative nominal' and 'qualitative ordinal', regardless of whether they appear alphanumeric and numeric respectively.
+    """
+    system_prompt = kwargs.get('system_prompt', content)
+
+    # function call
+    functions = {
+        "name": "get_column_type",
+        "description": "Identify column names, their data types, and whether they contain quantitative or qualitative data from a dataset.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "column_metadata": {
+                    "type": "array",
+                    "description": "Metadata for each column in the dataset.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "column_name": {
+                                "type": "string",
+                                "description": "The name of the column."
+                            },
+                            "column_type": {
+                                "type": "string",
+                                "description": "The data type of the column (e.g., integer, float, string, etc.). If mixed data types are present in the column, determine the majority type."
+                            },
+                            "value_categories": {
+                                "type": "object",
+                                "description": "Specifies if the column contains quantitative or qualitative data, along with a subcategory.",
+                                "properties": {
+                                    "type": {
+                                        "type": "string",
+                                        "description": "Whether the data is quantitative or qualitative."
+                                    },
+                                    "subcategory": {
+                                        "type": "string",
+                                        "description": "The subcategory of the data type (e.g., nominal, ordinal, discrete, continuous)."
+                                    }
+                                },
+                                "required": ["type", "subcategory"]
+                            }
+                        },
+                        "required": ["column_name", "column_type", "value_categories"]
+                    },
+                    "minItems": 1
+                }
+            },
+            "required": ["column_metadata"]
+        }
+    }
+
+    def number_of_lines(file_name):
+        with open(file_name, 'r',encoding=encoding) as f:
+            number_of_lines = len(f.readlines())
+            f.close()
+        return number_of_lines
+
+    data = ""
+    with open(file_name, 'r',encoding=encoding) as f:
+        for i in range(min(10, number_of_lines(file_name))):
+            data = data + f.readline()
+        f.close()
+
+    user_prompt = kwargs.get('user_prompt', data)
+    
+    # json data pass to openai to get column name, column type and category of column
+    json_data = {
+        "model": model,
+        "messages": [
+            {
+                "role": "system",
+                "content": system_prompt
+            },
+            {
+                "role": "user",
+                "content": user_prompt
+            },
+        ],
+        "functions": [functions],
+        "function_call": {
+            "name": "get_column_type"
+        }
+    }
+
+    try:
+        # post request to get column_metadata
+        response = requests.post(url=url, headers=headers, json=json_data)
+        column_metadata = json.loads(response.json()['choices'][0]['message']['function_call']['arguments'])
+
+        return column_metadata
+    except Exception as e:
+        raise e
+
 
 
 # create heatmap using correlation matrix using seaborn

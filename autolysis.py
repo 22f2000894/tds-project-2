@@ -7,10 +7,9 @@
 #     "tabulate",
 #     "chardet",
 #     "seaborn",
-#     "tenacity"
-#     "requests_cache"
-#     "requests"
-#     "hashlib"
+#     "tenacity",
+#     "requests_cache",
+#     "requests",
 # ]
 # ///
 
@@ -25,47 +24,122 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 import requests_cache
 import requests
+import pytz
+import base64
 from openai import OpenAI
-def print_hello_world():
-    AIPROXY_TOKEN = os.getenv("AIPROXY_TOKEN", "Hello World")
-    print(AIPROXY_TOKEN)
+from datetime import timedelta
+from tenacity import retry, stop_after_attempt, wait_fixed, RetryError
+from zoneinfo import ZoneInfo
+from datetime import datetime, timedelta
 
-print("Hello World")
-print_hello_world()
+AIPROXY_TOKEN = os.getenv("AIPROXY_TOKEN", "")
+
+
+
+@retry(stop=stop_after_attempt(3), wait=wait_fixed(2))  # Retry 3 times, wait 2 seconds between attempts
+def make_api_call(url, **kwargs):
+    """
+    Make an HTTP request
+    :kwargs: headers, json_data, params, url, data, timeout
+
+    """
+    method = kwargs.get('method', 'POST')
+    json_data = kwargs.get('json_data', {})
+    data = kwargs.get('data', None)
+    params = kwargs.get('params', None)
+    headers = kwargs.get('headers', None)
+    timeout = kwargs.get('timeout', 10)
+    try:
+        if method.upper() == "GET":
+            response = requests.get(url, headers=headers, params=params, timeout=timeout)
+        elif method.upper() == "POST":
+            response = requests.post(url, headers=headers, json=json_data, timeout=timeout)
+        elif method.upper() == "DELETE":
+            response = requests.delete(url, headers=headers, timeot=timeout)
+        elif method.upper() == "PUT":
+            response = requests.put(url, headers=headers, json=json_data, timeout=timeout)
+        else:
+            raise ValueError("Unsupported HTTP method")
+
+        # Raise an exception for HTTP errors
+        response.raise_for_status()
+        return response
+
+    except requests.exceptions.RequestException as e:
+        print(f"Request failed: {e}")
+        raise  # Propagate the exception to trigger retry
+
+
+
+def call_api_with_retry(url, **kwargs):
+
+    method = kwargs.get('method', 'POST')
+    headers = kwargs.get('headers', None)
+    json_data = kwargs.get('json_data', {})
+    timeout = kwargs.get('timeout', 10)
+
+    try:
+        response = make_api_call(url, method=method, json_data=json_data, headers=headers, timeout=timeout)
+        return response
+    except RetryError as e:  # Catches when all retries fail
+        print(f"All retry attempts failed: {e}")
+        return False
+    except Exception as e:
+        print(f"Unexpected error: {e}")
+        return False
 
 
 class CustomCacheManager:
-    def __init__(self, cache_name='custom_cache'):
+    def __init__(self, cache_name='api_cache',**kwargs):
         """
         Initialize a cached session with custom cache key management
         """
+        self.expire_after = kwargs.get('expire_after', timedelta(hours=24))
+        tz = pytz.timezone("Asia/Kolkata")
+        self.absolute_expiry = datetime.now(tz=tz) + self.expire_after
         # Create a cached session
         self.session = requests_cache.CachedSession(
             cache_name=cache_name,
             backend='sqlite',  # Using SQLite as cache backend
-            expire_after=timedelta(hours=24)  # Cache expiration
+            expire_after= self.expire_after,  # Cache expiration
+            allowable_methods=('GET', 'HEAD','OPTIONS','POST','PUT','DELETE', 'PATCH'),
+            cache_control=True
         )
 
-    def set_cache_response(self, cache_key, url, params=None, method='GET'):
+    def set_cache_response(self, cache_key, url, **kwargs):
         """
         Manually set a cached response with a specific cache key
         
         :param cache_key: Custom unique identifier for the cache entry
         :param url: URL to fetch
         :param params: Optional query parameters
-        :param method: HTTP method (default: GET)
+        :param method: HTTP method 
         :return: Response object
         """
-        # Perform the request
-        # response = self.session.request(method, url, params=params)
-        response = requests.get(url)
-        # Manually set the cache key
-        self.session.cache.save_response(
-            cache_key=cache_key,  # Use the custom cache key
-            response=response
-        )
+        # Perform the 
+        method = kwargs.get('method', 'POST')
+        params = kwargs.get('params', None)
+        headers = kwargs.get('headers', None)
+        json_data = kwargs.get('json_data', {})
+        url = url
         
-        return response
+        response = call_api_with_retry(url, method=method, headers=headers, json_data=json_data)
+        if response == False:
+            return None
+        else:
+            # Manually set the cache key
+            self.session.cache.save_response(
+                cache_key=cache_key,  # Use the custom cache key
+                response=response,
+                expires = self.absolute_expiry
+            )
+
+            self.session.cache.close()
+
+            return response
+
+
+       
 
     def get_cached_response(self, cache_key):
         """
@@ -77,12 +151,13 @@ class CustomCacheManager:
         try:
             # Attempt to retrieve the cached response
             cached_response = self.session.cache.get_response(key=cache_key)
-            return cached_response
+            if cached_response:
+                return cached_response
         except KeyError:
             print(f"No cached response found for key: {cache_key}")
             return None
 
-    def delete_cache_entry(self, cache_key):
+    def delete_cache_entry(self,**kwargs):
         """
         Delete a specific cache entry by its cache key
         
@@ -90,18 +165,42 @@ class CustomCacheManager:
         :return: Boolean indicating success
         """
         try:
-            # Remove the specific cache entry
-            self.session.cache.delete(cache_key)
-            print(f"Cache entry deleted for key: {cache_key}")
+            cache_key = kwargs.get('cache_key',None)
+            expired = kwargs.get('expired', True)
+            # Remove the specific cache 
+            if cache_key is None:
+                self.session.cache.delete(expired=expired)
+            else:
+                self.session.cache.delete(cache_key)
+                print(f"Cache entry deleted for key: {cache_key}")
+
             return True
         except Exception as e:
             print(f"Error deleting cache entry: {e}")
             return False
 
+    def clear_cache(self):
+        """
+        Clear the entire cache
+        """
+        self.session.cache.clear()
 
+        print("Cache cleared.")
 
+    def remove_expired_cache(self):
+        """
+        Remove expired cache entries
+        """
+        self.session.cache.delete(expired = True)
 
+        print("Expired cache entries removed.")
+    
+    
 
+cache_manager = CustomCacheManager(cache_name='api_cache', expire_after=timedelta(hours=24))
+
+def get_hash_key(key_name):
+    return hashlib.md5(key_name.encode('utf-8')).hexdigest()
 
 # detect encoding of csv file
 def detect_encoding(file_path):
@@ -116,7 +215,7 @@ def get_column_details(filename, **kwargs):
     # declare AIPROXY_TOKEN as global variable
     global AIPROXY_TOKEN
     # getting file encoding 
-    encoding = detect_encoding(filename)
+    encoding = kwargs.get('encoding', 'utf-8')
     # openai model
     model = kwargs.get('model', 'gpt-4o-mini')
     # url to do post request
@@ -196,8 +295,8 @@ def get_column_details(filename, **kwargs):
         return number_of_lines
 
     data = ""
-    with open(file_name, 'r',encoding=encoding) as f:
-        for i in range(min(10, number_of_lines(file_name))):
+    with open(filename, 'r',encoding=encoding) as f:
+        for i in range(min(10, number_of_lines(filename))):
             data = data + f.readline()
         f.close()
 
@@ -223,18 +322,58 @@ def get_column_details(filename, **kwargs):
     }
 
     try:
-        # post request to get column_metadata
-        response = requests.post(url=url, headers=headers, json=json_data)
-        column_metadata = json.loads(response.json()['choices'][0]['message']['function_call']['arguments'])
 
-        return column_metadata
+        # hash key
+        key_name = f"get_column_details_{filename}"
+        cache_key = get_hash_key(key_name)
+        # post request to get 
+        
+        response = cache_manager.get_cached_response(cache_key)
+        if response is None:
+            response = cache_manager.set_cache_response(cache_key, url, headers=headers, json_data=json_data)
+        
+        if response:
+            column_metadata = json.loads(response.json()['choices'][0]['message']['function_call']['arguments'])
+            return column_metadata
+           
     except Exception as e:
-        raise e
+        print(f"Error: {e}")
+        return {}
 
 
+
+def column_name_for_correlation_matrix(dict_data):
+    """
+    Extracts a list of column names from a dictionary containing column metadata.
+
+    Args:
+        dict_data (dict): A dictionary containing column metadata.
+
+    Returns:
+        list: A list of column names.
+    """
+    col_list = []
+    for col_dict in dict_data['column_metadata']:
+        if col_dict['value_categories']['type'] == 'quantitative':
+            col_list.append(col_dict['column_name'])
+    return col_list
+
+def create_correlation_matrix(df,selected_columns):
+    """
+    A function to create a correlation matrix from a DataFrame.
+
+    Args:
+        df (pandas.DataFrame): The DataFrame to create the correlation matrix from.
+        selected_columns (list): A list of column names to include in the correlation matrix.
+
+    Returns:
+        pandas.DataFrame: The correlation matrix.
+    """
+    correlation_matrix = df[selected_columns].corr()
+    return correlation_matrix
 
 # create heatmap using correlation matrix using seaborn
-def create_heatmap(correlation_matrix, output_file="correlation_heatmap.png"):
+def create_heatmap(correlation_matrix, output_filename, **kwargs):
     """
     Create and save a heatmap from a correlation matrix.
 
@@ -245,6 +384,10 @@ def create_heatmap(correlation_matrix, output_file="correlation_heatmap.png"):
     Returns:
         None
     """
+    # Set the output file path
+    output_filename = output_filename
+    title = kwargs.get('title', 'Correlation Matrix Heatmap')
+
     # Set the figure size
     plt.figure(figsize=(10, 8))
     
@@ -258,32 +401,27 @@ def create_heatmap(correlation_matrix, output_file="correlation_heatmap.png"):
     )
     
     # Add title to the heatmap
-    plt.title("Correlation Matrix Heatmap", fontsize=16)
+    plt.title(title, fontsize=16)
     
     # Save the heatmap as a PNG file
-    plt.savefig(output_file, dpi=300, bbox_inches="tight")
+    plt.savefig(output_filename, dpi=300, bbox_inches="tight")
     
     # Close the plot to avoid display issues in interactive environments
     plt.close()
 
-#  correlation matrix function
-def create_correlation_matrix(df,selected_columns):
-    correlation_matrix = df[selected_columns].corr()
-    return correlation_matrix
 
-# correlation matrix analysis 
-def correlation_matrix_analysis(correlation_matrix):
-    # generate story about correlation matrix using openai and heatmap of correlation matrix
-    openai.api_key = os.getenv("OPENAI_API_KEY")
-    response = openai.Completion.create(
-        model="text-davinci-003",
-        prompt=f"Generate a story about the correlation matrix: {correlation_matrix.to_markdown()}",
-        temperature=0.7,
-        max_tokens=1000,
-        top_p=1,
-        frequency_penalty=0,
-        presence_penalty=0
-    )
+def embedding_image(image_path):
+    # Path to your PNG file
+
+    # Read and encode the image in Base64
+    with open(image_path, "rb") as image_file:
+        base64_string = base64.b64encode(image_file.read()).decode('utf-8')
+
+    # Create the Markdown content
+    markdown_content = f"![Embedded Image](data:image/png;base64,{base64_string})"
+
+    return markdown_content
+
 
 
 
@@ -301,84 +439,37 @@ def summary_statistics(filename):
         # clean null values
         data = data.dropna()
 
-        # Numeric data correlation matrix
-        numeric_data = data.select_dtypes(include=['number'])
-        correlation_matrix = numeric_data.corr()
+        # Get column details
+        column_metadata = get_column_details(filename, encoding=encoding)
+        
+        # Create correlation matrix
+        selected_columns = column_name_for_correlation_matrix(column_metadata)
+        correlation_matrix = create_correlation_matrix(data, selected_columns)
 
         # Save summary statistics as Markdown
         file_directory = os.path.splitext(filename)[0]
         os.makedirs(file_directory, exist_ok=True)
         output_file = os.path.join(file_directory, f'{file_directory}.md')
+
         # correlation matrix heatmap
+        title = f"{file_directory.upper()} Correlation Matrix Heatmap"
         heat_map_file = os.path.join(file_directory, f'{file_directory}_heatmap.png')
-        create_heatmap(correlation_matrix, output_file=heat_map_file)
+        create_heatmap(correlation_matrix, output_filename=heat_map_file, title=title)
       
         with open(output_file, 'w', encoding='utf-8') as f:
             f.write("## Summary Statistics\n")
             f.write(data.describe(include="all").to_markdown() + "\n")
             f.write("\n## Correlation Matrix\n")
-            f.write(correlation_matrix.to_markdown() + "\n")
-
+            f.write(correlation_matrix.to_markdown() + "\n\n")
+            f.write(embedding_image(heat_map_file))
+            f.write("\n")
+        
+        f.close()
         print("Summary statistics saved to:", output_file)
 
     except Exception as e:
         print("An error occurred:", e)
 
-
-def function_calling(*args, **kwargs):
-
-    json_data = {
-        "model": "gpt-3.5-turbo",
-        "messages": [
-            {
-                "role": "system",
-                "content": "You are a helpful assistant."
-            },
-            {
-                "role": "user",
-                "content": "give coulmn name and its type of dataframe"
-            }
-        ]
-    }
-
-    # content 
-    content = {
-        "Analyze the given dataset. The first line is header, and subsequent lines"
-        "are sample data. Columns may have uncleaned data in them ignore those cells, Infer the data types by considering mazority of the data."
-        "'integer', 'float', 'string', 'date', 'datetime', 'boolean'."
-    }
-    
-    # function schema
-    functions = {
-        "name" : "get_column_type",
-        "description": "Identify column names and their data types from a dataset.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "column_metadata": {
-                    "type": "array",
-                    "description": "Meta data for each column.",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "column_name": {
-                                "type": "string",
-                                "description": "The Name of the column."
-                            },
-                            "column_type": {
-                                "type": "string",
-                                "description": "The data type of the column (e.g. integer, float, string, etc.)."
-                            }
-                        },
-                        "required": ["column_name", "column_type"]
-                    },
-                    "minItems" : 1,
-                },
-            },
-            "required": ["column_metadata"]
-        }
-    }
-        
 
 
 # Command-line argument handling

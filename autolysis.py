@@ -38,6 +38,10 @@ from scipy import stats
 
 AIPROXY_TOKEN = os.getenv("AIPROXY_TOKEN", "")
 
+if AIPROXY_TOKEN == "":
+    print("Please set the AIPROXY_TOKEN environment variable")
+    sys.exit(1)
+
 url = "https://aiproxy.sanand.workers.dev/openai/v1/chat/completions"
 
 headers = {
@@ -998,9 +1002,7 @@ def make_markdown_file(file_path):
 # Command-line argument handling
 if len(sys.argv) > 1:
     file_path = sys.argv[1]
-    print(file_path)
     filename = os.path.basename(file_path)
-    print(filename)
     make_markdown_file(file_path)
 else:
     print("Please provide a filename")

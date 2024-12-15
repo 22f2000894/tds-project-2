@@ -10,6 +10,7 @@
 #     "tenacity",
 #     "requests_cache",
 #     "requests",
+#     "scipy",
 # ]
 # ///
 
@@ -18,6 +19,7 @@ import sys
 import json
 import hashlib
 import pandas as pd
+import numpy as np
 import tabulate
 import chardet
 import seaborn as sns
@@ -31,10 +33,17 @@ from datetime import timedelta
 from tenacity import retry, stop_after_attempt, wait_fixed, RetryError
 from zoneinfo import ZoneInfo
 from datetime import datetime, timedelta
+from typing import Dict, Any, List, Optional
+from scipy import stats
 
 AIPROXY_TOKEN = os.getenv("AIPROXY_TOKEN", "")
 
+url = "https://aiproxy.sanand.workers.dev/openai/v1/chat/completions"
 
+headers = {
+    "Content-Type": "application/json",
+    "Authorization" : f"Bearer {AIPROXY_TOKEN}"
+}
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(2))  # Retry 3 times, wait 2 seconds between attempts
 def make_api_call(url, **kwargs):
@@ -169,7 +178,8 @@ class CustomCacheManager:
             expired = kwargs.get('expired', True)
             # Remove the specific cache 
             if cache_key is None:
-                self.session.cache.delete(expired=expired)
+                print("No cache key provided. Please provide a valid cache key.")
+                return False
             else:
                 self.session.cache.delete(cache_key)
                 print(f"Cache entry deleted for key: {cache_key}")
@@ -198,6 +208,400 @@ class CustomCacheManager:
     
 
 cache_manager = CustomCacheManager(cache_name='api_cache', expire_after=timedelta(hours=24))
+
+
+
+# ---------------------------------------------
+# class DataAnalysisAssistant to analyze data and get suggestions of columns
+# ---------------------------------------------
+
+class DataAnalysisAssistant:
+    def __init__(self, cache_manager=None, url=None, headers=None):
+        """
+        Initialize the Data Analysis Assistant with optional caching and API configurations.
+
+        Args:
+            cache_manager: A cache management system for storing API responses
+            url: API endpoint URL
+            headers: API request headers
+        """
+        self.cache_manager = cache_manager
+        self.url = url
+        self.headers = headers or {}
+        
+        # Define the system prompt as a class attribute for better organization
+        self.system_prompt = """
+        You are a data analysis assistant designed to parse column name and its data type 
+        for performing data analysis based on the structure and metadata of a CSV dataset. 
+        The dataset's metadata includes column names, data types, and value categories such 
+        as quantitative/qualitative and their subcategories (e.g., nominal, ordinal, discrete, continuous). 
+        
+        Key Analysis Focus Areas:
+        1. Summary Statistics
+        2. Missing Value Analysis
+        3. Correlation Matrices
+        4. Outlier Detection
+        5. Clustering
+        6. Hierarchy Detection
+        7. Advanced Analyses:
+           - Group-wise Summaries
+           - Feature Importance
+           - Data Visualization
+        8. Potential Insights:
+           - Outlier Detection: Identify errors, fraud, or opportunities
+           - Correlation Analysis: Understand impact factors
+           - Time Series Analysis: Predict future patterns
+           - Cluster Analysis: Identify natural groupings
+           - Network Analysis: Discover cross-selling or collaboration opportunities
+        """
+
+    def _generate_hash_key(self, key_name: str) -> str:
+        """
+        Generate a hash key for caching.
+
+        Args:
+            key_name: A string to be hashed
+
+        Returns:
+            A hash key as a string
+        """
+        return hashlib.md5(key_name.encode()).hexdigest()
+
+    def _prepare_function_descriptions(self) -> List[Dict[str, Any]]:
+        """
+        Prepare function descriptions for API call.
+
+        Returns:
+            A list of function description dictionaries
+        """
+        return [
+            {
+                "name": "get_data_analysis_functions_with_parameters",
+                "description": "Choose appropriate columns from metadata based on analysis function",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "outlier_and_anomaly_detection": {
+                            "type": "array",
+                            "description": "Columns suitable for outlier detection",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "column_name": {
+                                        "type": "string",
+                                        "description": "Name of column for outlier analysis"
+                                    },
+                                    "data_type": {
+                                        "type": "string",
+                                        "description": "Data type of column"
+                                    }
+                                }
+                            }
+                        },
+                        "create_correlation_matrix": {
+                            "type": "array",
+                            "description": "Columns suitable for correlation matrix",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "column_name": {
+                                        "type": "string",
+                                        "description": "Name of column for correlation analysis"
+                                    },
+                                    "data_type": {
+                                        "type": "string",
+                                        "description": "Data type of column"
+                                    }
+                                }
+                            }
+                        },
+                        "time_series_analysis": {
+                            "type": "array",
+                            "description": "Columns suitable for time series analysis",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "column_name": {
+                                        "type": "string",
+                                        "description": "Name of column for time series analysis"
+                                    },
+                                    "data_type": {
+                                        "type": "string",
+                                        "description": "Data type of column. Can be 'date', 'datetime', or 'time' and quantitative column also has to be present."
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        ]
+
+    def data_analysis(
+        self, 
+        column_metadata: str, 
+        model: str = "gpt-4o-mini", 
+        filename: str = ""
+    ) -> Dict[str, Any]:
+        """
+        Perform data analysis based on column metadata.
+
+        Args:
+            column_metadata: Metadata about dataset columns
+            model: AI model to use for analysis
+            filename: Name of the file being analyzed
+
+        Returns:
+            Dictionary of analysis results
+        """
+        # Prepare messages for API call
+        messages = [
+            {
+                "role": "system",
+                "content": self.system_prompt
+            },
+            {
+                "role": "user",
+                "content": f"""Suggest list of column names for analysis functions:
+                - Outlier and Anomaly Detection
+                - Correlation Matrix
+                - Time Series Analysis
+                Column Metadata: {column_metadata}"""
+            }
+        ]
+
+        # Prepare JSON payload for API request
+        json_data = {
+            "model": model,
+            "messages": messages,
+            "functions": self._prepare_function_descriptions(),
+            "function_call": {
+                "name": "get_data_analysis_functions_with_parameters"
+            }
+        }
+
+        try:
+            # Generate cache key
+            cache_key = self._generate_hash_key(f"data_analysis_{filename}")
+            
+            # Check and manage cache
+            if self.cache_manager:
+                response = self.cache_manager.get_cached_response(cache_key)
+                if response is None:
+                    print(self.url)
+                    response = self.cache_manager.set_cache_response(
+                        cache_key = cache_key,
+                        url = self.url,
+                        json_data = json_data,
+                        headers = self.headers 
+                    )
+                    if response is None:
+                        raise Exception("API request failed")
+                    function_call = response.json()['choices'][0]['message']['function_call']
+                    return json.loads(function_call['arguments'])
+                            
+            
+                # Process and return response
+                elif response:
+                    function_call = response.json()['choices'][0]['message']['function_call']
+                    return json.loads(function_call['arguments'])
+                
+        except Exception as e:
+            print(f"Data Analysis Error: {e}")
+            return {}
+
+# ---------------------------------------------
+# class AdvanceDataAnalysis  to analyze data
+# ---------------------------------------------
+
+class AdvancedDataAnalysis():
+    def __init__(self, csv_file):
+        """
+        Initialize the analysis with a CSV file
+        
+        Args:
+            csv_file (str): Path to the CSV file
+        """
+        # Load the data
+        encoding = detect_encoding(csv_file)
+        self.df = pd.read_csv(csv_file, encoding=encoding)
+        
+        # Prepare output directory
+        file_directory = os.path.splitext(csv_file)[0]
+        os.makedirs(file_directory, exist_ok=True)
+
+    def outlier_and_anomaly_detection(self, method='iqr', **kwargs):
+    
+        """
+        Detect outliers using multiple methods
+        
+        Args:
+            method (str): Method for outlier detection ('iqr', 'zscore' )
+        
+        Returns:
+            dict: Outlier detection results
+        """
+        selected_columns = kwargs.get('selected_columns', [])
+        # Numerical columns only
+        outliers = {}
+
+        if selected_columns:
+            numerical_cols = selected_columns
+        else:
+            numerical_cols = self.df.select_dtypes(include=['int64', 'float64']).columns
+
+        
+        if method == 'iqr':
+            for col in numerical_cols:
+                Q1 = self.df[col].quantile(0.25)
+                Q3 = self.df[col].quantile(0.75)
+                IQR = Q3 - Q1
+                lower_bound = Q1 - 1.5 * IQR
+                upper_bound = Q3 + 1.5 * IQR
+                
+                # Detect outliers
+                column_outliers = self.df[(self.df[col] < lower_bound) | (self.df[col] > upper_bound)]
+                
+                outliers[col] = {
+                    'total_outliers': len(column_outliers),
+                    'outlier_percentage': len(column_outliers) / len(self.df) * 100,
+                    'lower_bound': lower_bound,
+                    'upper_bound': upper_bound
+                }
+        
+        elif method == 'zscore':
+            for col in numerical_cols:
+                z_scores = np.abs(stats.zscore(self.df[col]))
+                column_outliers = self.df[z_scores > 3]
+                
+                outliers[col] = {
+                    'total_outliers': len(column_outliers),
+                    'outlier_percentage': len(column_outliers) / len(self.df) * 100
+                }
+        
+        
+        return outliers
+
+    def create_correlation_matrix(self, selected_columns):
+        """
+        A function to create a correlation matrix from a DataFrame.
+
+        Args:
+            df (pandas.DataFrame): The DataFrame to create the correlation matrix from.
+            selected_columns (list): A list of column names to include in the correlation matrix.
+
+        Returns:
+            pandas.DataFrame: The correlation matrix.
+        """
+        if selected_columns:
+            correlation_matrix = self.df[selected_columns].corr()
+            return correlation_matrix
+        else:
+            numerical_cols = self.df.select_dtypes(include=['int64', 'float64']).columns
+            correlation_matrix = self.df[numerical_cols].corr()
+            return correlation_matrix
+
+    # create heatmap using correlation matrix using seaborn
+    def create_heatmap(self, correlation_matrix, output_filename, **kwargs):
+        """
+        Create and save a heatmap from a correlation matrix.
+
+        Parameters:
+            correlation_matrix (pd.DataFrame): The correlation matrix.
+            output_file (str): The path to save the heatmap PNG file.
+
+        Returns:
+            None
+        """
+        # Set the output file path
+        output_filename = output_filename
+        title = kwargs.get('title', 'Correlation Matrix Heatmap')
+
+        # Set the figure size
+        plt.figure(figsize=(10, 8))
+        
+        # Create the heatmap
+        sns.heatmap(
+            correlation_matrix,
+            annot=True,         # Show correlation values on the heatmap
+            cmap="coolwarm",    # Choose a colormap
+            fmt=".2f",          # Format for annotation
+            linewidths=0.5,     # Line width between cells
+        )
+        
+        # Add title to the heatmap
+        plt.title(title, fontsize=16)
+        
+        # Save the heatmap as a PNG file
+        plt.savefig(output_filename, dpi=300, bbox_inches="tight")
+        
+        # Close the plot to avoid display issues in interactive environments
+        plt.close()
+
+
+ 
+    def time_series_analysis(self, filename, selected_columns, output_file_path, **kwargs):
+        # Get method, model, and period from kwargs
+        method = kwargs.get('method', 'ffill')
+        model = kwargs.get('model', 'additive')
+        period = kwargs.get('period', 12)  # Default period is 12 (monthly data)
+        datetime_column = kwargs.get('datetime_column', None)
+
+        # Read data from CSV
+        df = pd.read_csv(filename, parse_dates=[datetime_column], index_col=datetime_column)
+        
+        # Clean the data for each selected column
+        for column in selected_columns:
+            df[column] = pd.to_numeric(df[column], errors='coerce')  # Convert to numeric, handling errors
+            df[column] = df[column].fillna(method=method)  # Fill missing values
+        
+        # Loop over selected columns for seasonal decomposition
+        for column in selected_columns:
+            try:
+                # Perform seasonal decomposition on the current column
+                result = seasonal_decompose(df[column], model=model, period=period)
+
+                # Decide the best model (additive or multiplicative)
+                decision = decide_model(result)
+                
+                # Re-decompose if needed (multiplicative model)
+                if decision == "multiplicative":
+                    result = seasonal_decompose(df[column], model="multiplicative", period=period)
+                
+                # Plot the decomposition results
+                result.plot()
+                plt.savefig(f"{output_file_path}_{column}.png")
+                plt.close()  # Close the plot after saving it
+
+            except ValueError as e:
+                print(f"Error with column {column}: {e}")
+                continue
+
+            def decide_model(result):
+                seasonal = result.seasonal
+                trend = result.trend
+                residual = result.resid
+
+                # Check 1: Seasonal range proportionality
+                seasonal_range = seasonal.max() - seasonal.min()
+                mean_trend = trend.mean()
+                proportionality = seasonal_range / mean_trend
+
+                # Check 2: Residual coefficient of variation
+                residual_cv = np.std(residual.dropna()) / np.mean(trend.dropna())
+
+                # Check 3: Seasonal-to-trend ratio variance
+                seasonal_to_trend_ratio = (seasonal / trend).dropna()
+                ratio_variance = np.var(seasonal_to_trend_ratio)
+
+                # Decision rules
+                if proportionality > 0.1 or residual_cv > 0.1 or ratio_variance > 0.05:
+                    return "multiplicative"
+                else:
+                    return "additive"
+
+
+
 
 def get_hash_key(key_name):
     return hashlib.md5(key_name.encode('utf-8')).hexdigest()
@@ -243,50 +647,52 @@ def get_column_details(filename, **kwargs):
     system_prompt = kwargs.get('system_prompt', content)
 
     # function call
-    functions = {
-        "name": "get_column_type",
-        "description": "Identify column names, their data types, and whether they contain quantitative or qualitative data from a dataset.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "column_metadata": {
-                    "type": "array",
-                    "description": "Metadata for each column in the dataset.",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "column_name": {
-                                "type": "string",
-                                "description": "The name of the column."
-                            },
-                            "column_type": {
-                                "type": "string",
-                                "description": "The data type of the column (e.g., integer, float, string, etc.). If mixed data types are present in the column, determine the majority type."
-                            },
-                            "value_categories": {
-                                "type": "object",
-                                "description": "Specifies if the column contains quantitative or qualitative data, along with a subcategory.",
-                                "properties": {
-                                    "type": {
-                                        "type": "string",
-                                        "description": "Whether the data is quantitative or qualitative."
-                                    },
-                                    "subcategory": {
-                                        "type": "string",
-                                        "description": "The subcategory of the data type (e.g., nominal, ordinal, discrete, continuous)."
-                                    }
+    functions = [
+        {
+            "name": "get_column_type",
+            "description": "Identify column names, their data types, and whether they contain quantitative or qualitative data from a dataset.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "column_metadata": {
+                        "type": "array",
+                        "description": "Metadata for each column in the dataset.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "column_name": {
+                                    "type": "string",
+                                    "description": "The name of the column."
                                 },
-                                "required": ["type", "subcategory"]
-                            }
+                                "column_type": {
+                                    "type": "string",
+                                    "description": "The data type of the column (e.g., integer, float, string, etc.). If mixed data types are present in the column, determine the majority type."
+                                },
+                                "value_categories": {
+                                    "type": "object",
+                                    "description": "Specifies if the column contains quantitative or qualitative data, along with a subcategory.",
+                                    "properties": {
+                                        "type": {
+                                            "type": "string",
+                                            "description": "Whether the data is quantitative or qualitative."
+                                        },
+                                        "subcategory": {
+                                            "type": "string",
+                                            "description": "The subcategory of the data type (e.g., nominal, ordinal, discrete, continuous)."
+                                        }
+                                    },
+                                    "required": ["type", "subcategory"]
+                                }
+                            },
+                            "required": ["column_name", "column_type", "value_categories"]
                         },
-                        "required": ["column_name", "column_type", "value_categories"]
-                    },
-                    "minItems": 1
-                }
-            },
-            "required": ["column_metadata"]
+                        "minItems": 1
+                    }
+                },
+                "required": ["column_metadata"]
+            }
         }
-    }
+    ]
 
     def number_of_lines(file_name):
         with open(file_name, 'r',encoding=encoding) as f:
@@ -315,7 +721,7 @@ def get_column_details(filename, **kwargs):
                 "content": user_prompt
             },
         ],
-        "functions": [functions],
+        "functions": functions,
         "function_call": {
             "name": "get_column_type"
         }
@@ -342,73 +748,21 @@ def get_column_details(filename, **kwargs):
 
 
 
-def column_name_for_correlation_matrix(dict_data):
+def get_function_column_list(function_metadata, function_name):
     """
-    Extracts a list of column names from a dictionary containing column metadata.
+    Get column names for a specific function.
 
     Args:
-        dict_data (dict): A dictionary containing column metadata.
+        function_metadata (dict): Dictionary containing function metadata.
+        function_name (str): Name of the function.
 
     Returns:
-        list: A list of column names.
+        List of column names for the specified function.
     """
-    col_list = []
-    for col_dict in dict_data['column_metadata']:
-        if col_dict['value_categories']['type'] == 'quantitative':
-            col_list.append(col_dict['column_name'])
-    return col_list
-
-def create_correlation_matrix(df,selected_columns):
-    """
-    A function to create a correlation matrix from a DataFrame.
-
-    Args:
-        df (pandas.DataFrame): The DataFrame to create the correlation matrix from.
-        selected_columns (list): A list of column names to include in the correlation matrix.
-
-    Returns:
-        pandas.DataFrame: The correlation matrix.
-    """
-    correlation_matrix = df[selected_columns].corr()
-    return correlation_matrix
-
-# create heatmap using correlation matrix using seaborn
-def create_heatmap(correlation_matrix, output_filename, **kwargs):
-    """
-    Create and save a heatmap from a correlation matrix.
-
-    Parameters:
-        correlation_matrix (pd.DataFrame): The correlation matrix.
-        output_file (str): The path to save the heatmap PNG file.
-
-    Returns:
-        None
-    """
-    # Set the output file path
-    output_filename = output_filename
-    title = kwargs.get('title', 'Correlation Matrix Heatmap')
-
-    # Set the figure size
-    plt.figure(figsize=(10, 8))
-    
-    # Create the heatmap
-    sns.heatmap(
-        correlation_matrix,
-        annot=True,         # Show correlation values on the heatmap
-        cmap="coolwarm",    # Choose a colormap
-        fmt=".2f",          # Format for annotation
-        linewidths=0.5,     # Line width between cells
-    )
-    
-    # Add title to the heatmap
-    plt.title(title, fontsize=16)
-    
-    # Save the heatmap as a PNG file
-    plt.savefig(output_filename, dpi=300, bbox_inches="tight")
-    
-    # Close the plot to avoid display issues in interactive environments
-    plt.close()
-
+    l = []
+    for dict_data in function_metadata[function_name]:
+        l.append(dict_data['column_name'])
+    return l
 
 def embedding_image(image_path):
     # Path to your PNG file
@@ -422,8 +776,70 @@ def embedding_image(image_path):
 
     return markdown_content
 
+def make_markdown_file(filename):
+    """
+    Create a Markdown file for a given filename and directory.
+
+    Args:
+        filename (str): Name of the file.
+    
+    """
+    global url
+    try:
+        # Detect encoding
+        encoding = detect_encoding(filename)
+        print("Detected encoding:", encoding)
+
+        # Read CSV file
+        data = pd.read_csv(filename, encoding=encoding)
+        
+        # Save summary statistics as Markdown
+        file_directory = os.path.splitext(filename)[0]
+        os.makedirs(file_directory, exist_ok=True)
+        output_file = os.path.join(file_directory, f'{file_directory}.md')
+
+        # Get column metadata
+
+        # Get column details
+        column_metadata = get_column_details(filename, encoding=encoding)
+        # print(column_metadata)
+        # data 
+        data_analyse = DataAnalysisAssistant(cache_manager=cache_manager, url=url, headers=headers)
+        function_metadata = data_analyse.data_analysis(column_metadata, filename=filename)
+        
+        # advance analysis 
+        advanced_analysis = AdvancedDataAnalysis(filename)
+        # outlier and anamaly detection based on zscore
+        
+        outliers_column_list = get_function_column_list(function_metadata, function_name='outlier_and_anomaly_detection')
+        outliers = advanced_analysis.outlier_and_anomaly_detection(method='zscore', selected_columns=outliers_column_list)
+        outliers_df = pd.DataFrame(outliers)
+        # Create correlation matrix
+        correlation_columns = get_function_column_list(function_metadata, function_name='create_correlation_matrix')
+        correlation_matrix = advanced_analysis.create_correlation_matrix(selected_columns=correlation_columns)
+        headmap_file = os.path.join(file_directory, f'{file_directory}_heatmap.png') 
+        
+        title = f"{file_directory.upper()} Correlation Matrix Heatmap"
+        advanced_analysis.create_heatmap(correlation_matrix, output_filename=headmap_file, title=title)
+        headmap_image = embedding_image(headmap_file)
+
+        # Save summary statistics as Markdown
+        with open(output_file, 'w', encoding='utf-8') as f:
+            f.write("# Data Analysis of csv file - " + filename + "\n\n")
+            f.write("## Dataset\n\n")
+            f.write(data.head().to_markdown() + "\n\n")
+            f.write("## Summary Statistics\n\n")
+            f.write(data.describe(include="all").to_markdown() + "\n\n")
+            f.write("## Outlier And Anomaly Detection\n\n")
+            f.write(outliers_df.to_markdown() + "\n\n")
+            f.write("## Correlation Matrix\n\n")
+            f.write(correlation_matrix.to_markdown() + "\n\n")
+            f.write(headmap_image + "\n\n")
+            f.close()
 
 
+    except Exception as e:
+        print(f"Error: {e}")
 
 # writing summery statistics take filename from command arguments
 # Writing summary statistics - takes filename from command arguments
@@ -438,10 +854,11 @@ def summary_statistics(filename):
         
         # clean null values
         data = data.dropna()
-
+        print("column meta data")
         # Get column details
         column_metadata = get_column_details(filename, encoding=encoding)
         
+
         # Create correlation matrix
         selected_columns = column_name_for_correlation_matrix(column_metadata)
         correlation_matrix = create_correlation_matrix(data, selected_columns)
@@ -475,6 +892,7 @@ def summary_statistics(filename):
 # Command-line argument handling
 if len(sys.argv) > 1:
     filename = sys.argv[1]
-    summary_statistics(filename)
+    make_markdown_file(filename)
+    # summary_statistics(filename)
 else:
     print("Please provide a filename")

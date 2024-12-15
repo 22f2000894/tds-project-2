@@ -14,8 +14,8 @@
 # ]
 # ///
 
-import os
 import sys
+import os
 import json
 import hashlib
 import pandas as pd
@@ -209,7 +209,7 @@ class CustomCacheManager:
 
 cache_manager = CustomCacheManager(cache_name='api_cache', expire_after=timedelta(hours=24))
 
-
+cache_manager.remove_expired_cache()
 
 # ---------------------------------------------
 # class DataAnalysisAssistant to analyze data and get suggestions of columns
@@ -388,7 +388,6 @@ class DataAnalysisAssistant:
             if self.cache_manager:
                 response = self.cache_manager.get_cached_response(cache_key)
                 if response is None:
-                    print(self.url)
                     response = self.cache_manager.set_cache_response(
                         cache_key = cache_key,
                         url = self.url,
@@ -410,24 +409,166 @@ class DataAnalysisAssistant:
             print(f"Data Analysis Error: {e}")
             return {}
 
+        
+    def encode_image(self, image_path):
+        # Path to your PNG file
+
+        # Read and encode the image in Base64
+        with open(image_path, "rb") as image_file:
+            base64_string = base64.b64encode(image_file.read()).decode('utf-8')
+        return base64_string
+
+    def narate_story_of_chart(self, image_path, **kwargs):
+        """
+        Generate narrative of the chart image
+        """
+        timeout = kwargs.get('timeout', 20)
+        model = kwargs.get('model', 'gpt-4o-mini')
+        system_prompt = """
+        You are a data analysis assistant designed to generate a narrative summary of a chart image.
+        """
+        user_prompt = """
+        Please generate a brief summary of the following chart image.
+        """
+        # encoding image
+        image_string = self.encode_image(image_path)
+        image_name = os.path.basename(image_path)
+        
+        # Prepare messages for API call
+        messages = [
+            {
+                "role": "system",
+                "content": system_prompt
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text", 
+                        "text": user_prompt
+                    },
+                    {
+                        "type": "image_url", 
+                        "image_url": {
+                                        "url": f"data:image/png;base64,{image_string}",
+                                        "detail": "low"             
+                                    }
+                    }
+                ]
+            }
+        ]
+
+        # Prepare JSON payload for API request
+        json_data = {
+            "model": model,
+            "messages": messages,
+            "max_tokens": 300
+        }
+
+        try:
+            # Generate cache key
+            cache_key = self._generate_hash_key(f"narate_story_of_chart_{image_name}")
+            
+            # Check and manage cache
+            if self.cache_manager:
+                response = self.cache_manager.get_cached_response(cache_key)
+                if response is None:
+                    response = self.cache_manager.set_cache_response(
+                        cache_key = cache_key,
+                        url = self.url,
+                        json_data = json_data,
+                        headers = self.headers,
+                        timeout = timeout 
+                    )
+                    if response is None:
+                        raise Exception("API request failed")
+                    return response.json()['choices'][0]['message']['content']
+                            
+            
+                # Process and return response
+                elif response:
+                    return response.json()['choices'][0]['message']['content']
+                
+        except Exception as e:
+            print(f"Data Analysis Error: {e}")
+            return ""
+
+    def narate_summary(self,filename, **kwargs):
+        """
+        Generate summary of the dataset
+        """
+        summary_details = kwargs.get('summary_details', "")
+        system_prompt = """
+            You are a data analysis assistant designed to generate a summary of a dataset.
+        """
+        user_prompt = f"""
+            Please generate a brief summary of the following {summary_details}.
+        """
+        # Prepare messages for API call
+        messages = [
+            {
+                "role": "system",
+                "content": system_prompt
+            },
+            {
+                "role": "user",
+                "content": user_prompt
+            }
+        ]
+
+        # Prepare JSON payload for API request
+        json_data = {
+            "model": "gpt-4o-mini",
+            "messages": messages,
+        }
+    
+        try:
+
+            # Generate cache key
+            cache_key = self._generate_hash_key(f"narate_summary_{filename}")
+            
+            # Check and manage cache
+            if self.cache_manager:
+                response = self.cache_manager.get_cached_response(cache_key)
+                if response is None:
+                    response = self.cache_manager.set_cache_response(
+                        cache_key = cache_key,
+                        url = self.url,
+                        json_data = json_data,
+                        headers = self.headers 
+                    )
+                    if response is None:
+                        raise Exception("API request failed")
+                    return response.json()['choices'][0]['message']['content']
+                            
+            
+                # Process and return response
+                elif response:
+                    return response.json()['choices'][0]['message']['content']
+                
+        except Exception as e:
+            print(f"Data Analysis Error: {e}")
+            return ""
+
 # ---------------------------------------------
 # class AdvanceDataAnalysis  to analyze data
 # ---------------------------------------------
 
 class AdvancedDataAnalysis():
-    def __init__(self, csv_file):
+    def __init__(self, csv_file_path):
         """
         Initialize the analysis with a CSV file
         
         Args:
-            csv_file (str): Path to the CSV file
+            csv_file_path (str): Path to the CSV file
         """
         # Load the data
-        encoding = detect_encoding(csv_file)
-        self.df = pd.read_csv(csv_file, encoding=encoding)
+        encoding = detect_encoding(csv_file_path)
+        self.df = pd.read_csv(csv_file_path, encoding=encoding)
         
         # Prepare output directory
-        file_directory = os.path.splitext(csv_file)[0]
+        filename = os.path.basename(csv_file_path)
+        file_directory = os.path.splitext(filename)[0]
         os.makedirs(file_directory, exist_ok=True)
 
     def outlier_and_anomaly_detection(self, method='iqr', **kwargs):
@@ -540,7 +681,7 @@ class AdvancedDataAnalysis():
 
 
  
-    def time_series_analysis(self, filename, selected_columns, output_file_path, **kwargs):
+    def time_series_analysis(self, file_path, selected_columns, output_file_path, **kwargs):
         # Get method, model, and period from kwargs
         method = kwargs.get('method', 'ffill')
         model = kwargs.get('model', 'additive')
@@ -548,7 +689,7 @@ class AdvancedDataAnalysis():
         datetime_column = kwargs.get('datetime_column', None)
 
         # Read data from CSV
-        df = pd.read_csv(filename, parse_dates=[datetime_column], index_col=datetime_column)
+        df = pd.read_csv(file_path, parse_dates=[datetime_column], index_col=datetime_column)
         
         # Clean the data for each selected column
         for column in selected_columns:
@@ -615,7 +756,7 @@ def detect_encoding(file_path):
 
 
 
-def get_column_details(filename, **kwargs):
+def get_column_details(file_path, **kwargs):
     # declare AIPROXY_TOKEN as global variable
     global AIPROXY_TOKEN
     # getting file encoding 
@@ -694,15 +835,15 @@ def get_column_details(filename, **kwargs):
         }
     ]
 
-    def number_of_lines(file_name):
-        with open(file_name, 'r',encoding=encoding) as f:
+    def number_of_lines(file_path):
+        with open(file_path, 'r', encoding=encoding) as f:
             number_of_lines = len(f.readlines())
             f.close()
         return number_of_lines
 
     data = ""
-    with open(filename, 'r',encoding=encoding) as f:
-        for i in range(min(10, number_of_lines(filename))):
+    with open(file_path, 'r', encoding=encoding) as f:
+        for i in range(min(10, number_of_lines(file_path))):
             data = data + f.readline()
         f.close()
 
@@ -728,7 +869,9 @@ def get_column_details(filename, **kwargs):
     }
 
     try:
-
+        
+        
+        filename = os.path.basename(file_path)
         # hash key
         key_name = f"get_column_details_{filename}"
         cache_key = get_hash_key(key_name)
@@ -776,7 +919,7 @@ def embedding_image(image_path):
 
     return markdown_content
 
-def make_markdown_file(filename):
+def make_markdown_file(file_path):
     """
     Create a Markdown file for a given filename and directory.
 
@@ -787,28 +930,29 @@ def make_markdown_file(filename):
     global url
     try:
         # Detect encoding
-        encoding = detect_encoding(filename)
+        encoding = detect_encoding(file_path)
         print("Detected encoding:", encoding)
 
         # Read CSV file
-        data = pd.read_csv(filename, encoding=encoding)
+        data = pd.read_csv(file_path, encoding=encoding)
         
         # Save summary statistics as Markdown
+        filename = os.path.basename(file_path)
         file_directory = os.path.splitext(filename)[0]
         os.makedirs(file_directory, exist_ok=True)
-        output_file = os.path.join(file_directory, f'{file_directory}.md')
+        output_file = os.path.join(file_directory, 'README.md')
 
         # Get column metadata
 
         # Get column details
-        column_metadata = get_column_details(filename, encoding=encoding)
+        column_metadata = get_column_details(file_path, encoding=encoding)
         # print(column_metadata)
         # data 
         data_analyse = DataAnalysisAssistant(cache_manager=cache_manager, url=url, headers=headers)
         function_metadata = data_analyse.data_analysis(column_metadata, filename=filename)
         
         # advance analysis 
-        advanced_analysis = AdvancedDataAnalysis(filename)
+        advanced_analysis = AdvancedDataAnalysis(file_path)
         # outlier and anamaly detection based on zscore
         
         outliers_column_list = get_function_column_list(function_metadata, function_name='outlier_and_anomaly_detection')
@@ -819,9 +963,17 @@ def make_markdown_file(filename):
         correlation_matrix = advanced_analysis.create_correlation_matrix(selected_columns=correlation_columns)
         headmap_file = os.path.join(file_directory, f'{file_directory}_heatmap.png') 
         
+        # Create heatmap
         title = f"{file_directory.upper()} Correlation Matrix Heatmap"
         advanced_analysis.create_heatmap(correlation_matrix, output_filename=headmap_file, title=title)
         headmap_image = embedding_image(headmap_file)
+
+        # heatmap summary
+        chart_summary = data_analyse.narate_story_of_chart(headmap_file)
+
+        # data summary
+        summary_details = "" +str(data.describe(include="all")) + str(outliers)
+        dataset_summary = data_analyse.narate_summary(filename, summary_details=summary_details)
 
         # Save summary statistics as Markdown
         with open(output_file, 'w', encoding='utf-8') as f:
@@ -832,67 +984,23 @@ def make_markdown_file(filename):
             f.write(data.describe(include="all").to_markdown() + "\n\n")
             f.write("## Outlier And Anomaly Detection\n\n")
             f.write(outliers_df.to_markdown() + "\n\n")
+            f.write(dataset_summary + "\n\n")
             f.write("## Correlation Matrix\n\n")
             f.write(correlation_matrix.to_markdown() + "\n\n")
             f.write(headmap_image + "\n\n")
+            f.write(chart_summary + "\n\n")
             f.close()
 
 
     except Exception as e:
         print(f"Error: {e}")
 
-# writing summery statistics take filename from command arguments
-# Writing summary statistics - takes filename from command arguments
-def summary_statistics(filename):
-    try:
-        # Detect encoding
-        encoding = detect_encoding(filename)
-        print("Detected encoding:", encoding)
-
-        # Read CSV file
-        data = pd.read_csv(filename, encoding=encoding)
-        
-        # clean null values
-        data = data.dropna()
-        print("column meta data")
-        # Get column details
-        column_metadata = get_column_details(filename, encoding=encoding)
-        
-
-        # Create correlation matrix
-        selected_columns = column_name_for_correlation_matrix(column_metadata)
-        correlation_matrix = create_correlation_matrix(data, selected_columns)
-
-        # Save summary statistics as Markdown
-        file_directory = os.path.splitext(filename)[0]
-        os.makedirs(file_directory, exist_ok=True)
-        output_file = os.path.join(file_directory, f'{file_directory}.md')
-
-        # correlation matrix heatmap
-        title = f"{file_directory.upper()} Correlation Matrix Heatmap"
-        heat_map_file = os.path.join(file_directory, f'{file_directory}_heatmap.png')
-        create_heatmap(correlation_matrix, output_filename=heat_map_file, title=title)
-      
-        with open(output_file, 'w', encoding='utf-8') as f:
-            f.write("## Summary Statistics\n")
-            f.write(data.describe(include="all").to_markdown() + "\n")
-            f.write("\n## Correlation Matrix\n")
-            f.write(correlation_matrix.to_markdown() + "\n\n")
-            f.write(embedding_image(heat_map_file))
-            f.write("\n")
-        
-        f.close()
-        print("Summary statistics saved to:", output_file)
-
-    except Exception as e:
-        print("An error occurred:", e)
-
-
-
 # Command-line argument handling
 if len(sys.argv) > 1:
-    filename = sys.argv[1]
-    make_markdown_file(filename)
-    # summary_statistics(filename)
+    file_path = sys.argv[1]
+    print(file_path)
+    filename = os.path.basename(file_path)
+    print(filename)
+    make_markdown_file(file_path)
 else:
     print("Please provide a filename")

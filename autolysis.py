@@ -16,6 +16,7 @@
 
 import sys
 import os
+import shutil
 import json
 import hashlib
 import pandas as pd
@@ -923,6 +924,47 @@ def embedding_image(image_path):
 
     return markdown_content
 
+
+
+def create_directory_and_copy_files(file_path, source_dir):
+    # Extract the directory of the given file path
+    base_path, file_name = os.path.split(file_path)
+    
+    # Remove the file extension to use as the directory name
+    dir_name = os.path.splitext(file_name)[0]
+    
+    # Create the new directory path
+    new_dir_path = os.path.join(base_path, dir_name)
+    
+    # Create the directory if it doesn't already exist
+    if not os.path.exists(new_dir_path):
+        os.makedirs(new_dir_path)
+        print(f"Directory created: {new_dir_path}")
+    else:
+        print(f"Directory already exists: {new_dir_path}")
+    
+    # Copy all files from the source directory to the new directory
+    if os.path.exists(source_dir):
+        for item in os.listdir(source_dir):
+            source_item = os.path.join(source_dir, item)
+            destination_item = os.path.join(new_dir_path, item)
+            
+            # Check if source and destination are the same
+            if os.path.abspath(source_item) == os.path.abspath(destination_item):
+                print(f"Skipped copying (source and destination are the same): {source_item}")
+                continue
+            
+            if os.path.isfile(source_item):
+                shutil.copy(source_item, destination_item)
+                print(f"Copied file: {source_item} to {destination_item}")
+            elif os.path.isdir(source_item):
+                shutil.copytree(source_item, destination_item)
+                print(f"Copied directory: {source_item} to {destination_item}")
+    else:
+        print(f"Source directory does not exist: {source_dir}")
+
+
+
 def make_markdown_file(file_path):
     """
     Create a Markdown file for a given filename and directory.
@@ -995,6 +1037,8 @@ def make_markdown_file(file_path):
             f.write(chart_summary + "\n\n")
             f.close()
 
+        # copy all file from file_directory
+        create_directory_and_copy_files(file_path, file_directory)
 
     except Exception as e:
         print(f"Error: {e}")
